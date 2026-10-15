@@ -1,0 +1,7 @@
+.git
+.github
+.gitignore
+Dockerfile
+README.md
+docker-compose*.yml
+/opencode-v2-containerized

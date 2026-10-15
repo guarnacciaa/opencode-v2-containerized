@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    name: Build + smoke test (no push)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Resolve latest v2
+        id: v
+        run: |
+          chmod +x scripts/resolve-latest-v2.sh
+          echo "version=$(./scripts/resolve-latest-v2.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Build (amd64 only, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          build-args: |
+            OPENCODE_VERSION=${{ steps.v.outputs.version }}
+          tags: |
+            opencode-v2-ci:${{ steps.v.outputs.version }}
+
+      - name: Smoke test
+        run: |
+          docker run --rm opencode-v2-ci:${{ steps.v.outputs.version }} --version
+          docker run -d --name serve-test -p 4096:4096 \
+            -e OPENCODE_SERVER_PASSWORD=ci-secret \
+            opencode-v2-ci:${{ steps.v.outputs.version }}
+          for i in $(seq 1 30); do
+            bash -c 'exec 3<>/dev/tcp/127.0.0.1/4096' 2>/dev/null && break || sleep 2
+          done
+          bash -c 'exec 3<>/dev/tcp/127.0.0.1/4096'
+          docker logs serve-test --tail 20
+          docker stop serve-test && docker rm serve-test
+
+      - name: Shellcheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: "./scripts"

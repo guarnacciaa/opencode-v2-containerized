@@ -1,0 +1,39 @@
+# Everything is configurable via environment (see .env.example).
+# Quick start:
+#   cp .env.example .env   # then set OPENCODE_SERVER_PASSWORD
+#   docker compose up -d
+# Works out of the box even without a .env file (defaults apply).
+
+services:
+  opencode:
+    # Fork: point IMAGE at your own image (see .env.example).
+    image: ${IMAGE:-guarnacciaa/opencode-v2:latest}
+    container_name: opencode-v2
+    working_dir: /workspace
+    ports:
+      - "${HOST_PORT:-4096}:${OPENCODE_PORT:-4096}"
+    volumes:
+      # your project, served by the web UI
+      - "${WORKSPACE_DIR:-.}:/workspace"
+      # persist config/auth and server data across restarts
+      - opencode-config:/home/opencode/.config/opencode
+      - opencode-local:/home/opencode/.local/share/opencode
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      OPENCODE_HOSTNAME: ${OPENCODE_HOSTNAME:-0.0.0.0}
+      OPENCODE_PORT: ${OPENCODE_PORT:-4096}
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      TZ: ${TZ:-Etc/UTC}
+    # default command is `serve` (hostname/port filled from env above).
+    # Override it to use the CLI/TUI instead, e.g.:
+    # command: ["run", "explain this repo"]
+    stdin_open: true
+    tty: true
+
+volumes:
+  opencode-config:
+  opencode-local:

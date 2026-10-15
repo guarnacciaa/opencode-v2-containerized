@@ -1,0 +1,158 @@
+name: Build & Push opencode v2 image
+
+# Pipeline: every day it resolves the newest v2 release of opencode
+# (from the npm registry @opencode/cli-linux-x64, same source as the
+# official script https://opencode.ai/v2/install) and, if the matching
+# tag does not exist yet on Docker Hub, builds multi-arch and pushes
+# <IMAGE_NAME>:<version> plus floating tags.
+#
+# Fork-friendly: the image name lives in env.IMAGE_NAME below; labels and
+# the Docker Hub existence check follow it (and the repo) automatically.
+#
+# Required secrets (Settings > Secrets and variables > Actions):
+#   DOCKERHUB_USERNAME  -> your Docker Hub username
+#   DOCKERHUB_TOKEN     -> Docker Hub access token (Account Settings > Security),
+#                          NOT the password (Docker Hub no longer accepts passwords via API).
+
+on:
+  schedule:
+    # every day at 06:00 UTC
+    - cron: "0 6 * * *"
+  push:
+    branches: ["main"]
+    paths:
+      - "Dockerfile"
+      - "docker-entrypoint.sh"
+      - "scripts/**"
+      - ".github/workflows/docker-publish.yml"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. 2.0.29). Empty = detected newest v2"
+        required: false
+        default: ""
+      force:
+        description: "Force rebuild+push even if the tag already exists on Docker Hub"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+env:
+  # Fork: change this to your Docker Hub repo (e.g. myuser/opencode-v2).
+  IMAGE_NAME: guarnacciaa/opencode-v2
+
+jobs:
+  resolve:
+    name: Resolve latest v2
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      major: ${{ steps.v.outputs.major }}
+      minor: ${{ steps.v.outputs.minor }}
+      requested: ${{ steps.v.outputs.requested }}
+    steps:
+      - name: Resolve version
+        id: v
+        run: |
+          set -euo pipefail
+          REQ="${{ inputs.version }}"
+          if [[ -n "$REQ" ]]; then
+            VER="${REQ#v}"
+          else
+            JSON="$(curl -fsSL "https://registry.npmjs.org/@opencode%2fcli-linux-x64")"
+            VER="$(echo "$JSON" | jq -r '.versions | keys[] | select(startswith("2."))' | sort -V | tail -n 1)"
+            VER="${VER#v}"
+          fi
+          if [[ -z "$VER" ]]; then echo "version resolution failed" >&2; exit 1; fi
+          MAJOR="${VER%%.*}"
+          MINOR="$(echo "$VER" | cut -d. -f1-2)"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+          echo "minor=$MINOR" >> "$GITHUB_OUTPUT"
+          echo "requested=$REQ" >> "$GITHUB_OUTPUT"
+          echo "Resolved opencode v$VER (major=$MAJOR minor=$MINOR)"
+
+  check:
+    name: Check Docker Hub tag
+    runs-on: ubuntu-latest
+    needs: resolve
+    outputs:
+      skip: ${{ steps.c.outputs.skip }}
+    steps:
+      - name: Check if tag already exists
+        id: c
+        run: |
+          set -euo pipefail
+          VER="${{ needs.resolve.outputs.version }}"
+          FORCE="${{ inputs.force }}"
+          CODE="$(curl -s -o /dev/null -w "%{http_code}" "https://hub.docker.com/v2/repositories/${{ env.IMAGE_NAME }}/tags/${VER}/")"
+          echo "Docker Hub tag $VER -> HTTP $CODE (force=$FORCE)"
+          if [[ "$CODE" == "200" && "$FORCE" != "true" && "${{ github.event_name }}" != "push" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Tag already present, skipping build."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build & Push (amd64+arm64)
+    runs-on: ubuntu-latest
+    needs: [resolve, check]
+    if: needs.check.outputs.skip != 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            OPENCODE_VERSION=${{ needs.resolve.outputs.version }}
+            IMAGE_NAME=${{ env.IMAGE_NAME }}
+            SOURCE_REPO=${{ github.server_url }}/${{ github.repository }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.version }}
+            ${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.minor }}
+            ${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.major }}
+            ${{ env.IMAGE_NAME }}:v2
+            ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test (amd64)
+        run: |
+          docker run --rm ${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.version }} --version
+          docker run -d --name serve-test -p 4096:4096 \
+            -e OPENCODE_SERVER_PASSWORD=ci-secret \
+            ${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.version }}
+          for i in $(seq 1 30); do
+            bash -c 'exec 3<>/dev/tcp/127.0.0.1/4096' 2>/dev/null && break || sleep 2
+          done
+          bash -c 'exec 3<>/dev/tcp/127.0.0.1/4096'
+          docker logs serve-test --tail 20
+          docker stop serve-test && docker rm serve-test
+
+      - name: Summary
+        run: |
+          echo "### Pushed ${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.minor }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.major }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ${{ env.IMAGE_NAME }}:v2" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ${{ env.IMAGE_NAME }}:latest" >> "$GITHUB_STEP_SUMMARY"

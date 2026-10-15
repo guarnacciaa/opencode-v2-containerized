@@ -1,0 +1,33 @@
+name: Sync Docker Hub description
+
+# Keeps the Docker Hub repository page (short + full description) in sync
+# with README.md on every push to main. Uses the same Docker Hub secrets
+# as the publish pipeline. Fork: the target repository follows IMAGE_NAME.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "README.md"
+      - ".github/workflows/dockerhub-description.yml"
+  workflow_dispatch:
+
+env:
+  # Fork: change this to your Docker Hub repo (e.g. myuser/opencode-v2).
+  IMAGE_NAME: guarnacciaa/opencode-v2
+
+jobs:
+  sync:
+    name: Update Docker Hub description
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync README to Docker Hub
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.IMAGE_NAME }}
+          short-description: "Unofficial Docker image for opencode v2 (web UI), auto-rebuilt on every release"
+          readme-filepath: ./README.md
